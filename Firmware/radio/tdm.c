@@ -53,6 +53,9 @@
 enum tdm_state { TDM_TRANSMIT=0, TDM_SILENCE1=1, TDM_RECEIVE=2, TDM_SILENCE2=3 };
 __pdata static enum tdm_state tdm_state;
 
+/// current slot in multipoint TDM cycle (0 to NUM_NODES-1)
+__pdata static uint8_t current_slot;
+
 /// a packet buffer for the TDM code
 __xdata uint8_t	pbuf[MAX_PACKET_LENGTH];
 
@@ -144,6 +147,8 @@ struct tdm_trailer {
 	uint16_t command:1;
 	uint16_t bonus:1;
 	uint16_t resend:1;
+	uint8_t source_node:4;  // Source node ID (0-15)
+	uint8_t dest_node:4;    // Destination node ID (0-15, 0xF=broadcast)
 #ifdef INCLUDE_AES
 	uint16_t crc;
 #endif
@@ -222,7 +227,12 @@ sync_tx_windows(__pdata uint8_t packet_length)
 {
   __data enum tdm_state old_state = tdm_state;
   __pdata uint16_t old_remaining = tdm_state_remaining;
-  
+  __pdata uint8_t node_id = param_get(PARAM_NODEID);
+
+  // In multipoint mode, sync our slot to the source node's slot
+  // The transmitting node is in its own transmit slot
+  current_slot = trailer.source_node;
+
   if (trailer.bonus) {
     // the other radio is using our transmit window
     // via yielded ticks
@@ -241,13 +251,22 @@ sync_tx_windows(__pdata uint8_t packet_length)
       tdm_state = TDM_SILENCE2;
       tdm_state_remaining = 1;
     } else {
-      tdm_state = TDM_TRANSMIT;
+      // Check if this is our transmit slot
+      if (current_slot == node_id) {
+        tdm_state = TDM_TRANSMIT;
+      } else {
+        tdm_state = TDM_RECEIVE;
+      }
       tdm_state_remaining = trailer.window;
     }
   } else {
     // we are in the other radios transmit window, our
-    // receive window
-    tdm_state = TDM_RECEIVE;
+    // receive window (unless it's our slot)
+    if (current_slot == node_id) {
+      tdm_state = TDM_TRANSMIT;
+    } else {
+      tdm_state = TDM_RECEIVE;
+    }
     tdm_state_remaining = trailer.window;
   }
   
@@ -280,6 +299,9 @@ sync_tx_windows(__pdata uint8_t packet_length)
 static void
 tdm_state_update(__pdata uint16_t tdelta)
 {
+  __pdata uint8_t node_id = param_get(PARAM_NODEID);
+  __pdata uint8_t num_nodes = param_get(PARAM_NUM_NODES);
+
   // update the amount of time we are waiting for a preamble
   // to turn into a real packet
   if (tdelta > transmit_wait) {
@@ -287,52 +309,64 @@ tdm_state_update(__pdata uint16_t tdelta)
   } else {
     transmit_wait -= tdelta;
   }
-  
+
   // have we passed the next transition point?
   while (tdelta >= tdm_state_remaining) {
     // advance the tdm state machine
     tdm_state = (tdm_state+1) % 4;
-    
+
     // work out the time remaining in this state
     tdelta -= tdm_state_remaining;
-    
+
+    // On SILENCE1 -> RECEIVE transition, advance to next slot
+    if (tdm_state == TDM_RECEIVE) {
+      current_slot = (current_slot + 1) % num_nodes;
+    }
+
+    // Determine if this is our transmit slot or receive slot
     if (tdm_state == TDM_TRANSMIT || tdm_state == TDM_RECEIVE) {
       tdm_state_remaining = tx_window_width;
+      // Override state based on current slot
+      if (current_slot == node_id) {
+        tdm_state = TDM_TRANSMIT;
+      } else {
+        tdm_state = TDM_RECEIVE;
+      }
     } else {
       tdm_state_remaining = silence_period;
     }
-    
+
     // change frequency at the start and end of our transmit window
     // this maximises the chance we will be on the right frequency
     // to match the other radio
     if (tdm_state == TDM_TRANSMIT || tdm_state == TDM_SILENCE1) {
       fhop_window_change();
       radio_receiver_on();
-      
+
       if (num_fh_channels > 1) {
         // reset the LBT listen time
         lbt_listen_time = 0;
         lbt_rand = 0;
       }
     }
-    
+
     if (tdm_state == TDM_TRANSMIT && (duty_cycle - duty_cycle_offset) != 100) {
       // update duty cycle averages
       average_duty_cycle = (0.95*average_duty_cycle) + (0.05*(100.0*transmitted_ticks)/(2*(silence_period+tx_window_width)));
       transmitted_ticks = 0;
       duty_cycle_wait = (average_duty_cycle >= (duty_cycle - duty_cycle_offset));
     }
-    
+
     // we lose the bonus on all state changes
     bonus_transmit = 0;
-    
+
     // reset yield flag on all state changes
     transmit_yield = 0;
-    
+
     // no longer waiting for a packet
     transmit_wait = 0;
   }
-  
+
   tdm_state_remaining -= tdelta;
 }
 
@@ -573,7 +607,16 @@ tdm_serial_loop(void)
       // extract control bytes from end of packet
       memcpy(&trailer, &pbuf[len-sizeof(trailer)], sizeof(trailer));
       len -= sizeof(trailer);
-      
+
+      // Check if packet is addressed to this node or broadcast
+      {
+        __pdata uint8_t my_node_id = param_get(PARAM_NODEID);
+        if (trailer.dest_node != 0xF && trailer.dest_node != my_node_id) {
+          // Packet not for us, ignore it
+          continue;
+        }
+      }
+
       if (trailer.window == 0 && len != 0) {
         // its a control packet
         if (len == sizeof(struct statistics)) {
@@ -766,7 +809,9 @@ tdm_serial_loop(void)
     
     trailer.bonus = (tdm_state == TDM_RECEIVE);
     trailer.resend = packet_is_resend();
-    
+    trailer.source_node = param_get(PARAM_NODEID);
+    trailer.dest_node = 0xF;  // Broadcast to all nodes
+
     if (tdm_state == TDM_TRANSMIT &&
             len == 0 &&
             send_statistics &&
@@ -1062,11 +1107,15 @@ tdm_init(void)
 #ifdef TDM_SYNC_LOGIC
         TDM_SYNC_PIN = false;
 #endif // TDM_SYNC_LOGIC
-                
+
+	// Initialize multipoint slot tracking
+	// Start at our own node ID so we begin in transmit mode
+	current_slot = param_get(PARAM_NODEID);
+
 	// crc_test();
 
 	// tdm_test_timing();
-	
+
 	// golay_test();
 }
 

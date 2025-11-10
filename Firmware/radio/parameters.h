@@ -65,6 +65,8 @@ enum ParamID {
 #ifdef INCLUDE_AES
   PARAM_ENCRYPTION,     // no Enycryption (0), 128 or 256 bit key
 #endif
+	PARAM_NODEID,			// Node ID for multipoint (0-15)
+	PARAM_NUM_NODES,		// Number of nodes in multipoint network (2-16)
 	PARAM_MAX				// must be last
 };
 
