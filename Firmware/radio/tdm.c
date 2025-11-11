@@ -56,6 +56,10 @@ __pdata static enum tdm_state tdm_state;
 /// current slot in multipoint TDM cycle (0 to NUM_NODES-1)
 __pdata static uint8_t current_slot;
 
+/// cached multipoint configuration (set once in tdm_init)
+__pdata static uint8_t my_node_id;
+__pdata static uint8_t num_nodes;
+
 /// a packet buffer for the TDM code
 __xdata uint8_t	pbuf[MAX_PACKET_LENGTH];
 
@@ -228,14 +232,13 @@ sync_tx_windows(__pdata uint8_t packet_length)
 {
   __data enum tdm_state old_state = tdm_state;
   __pdata uint16_t old_remaining = tdm_state_remaining;
-  __pdata uint8_t node_id = param_get(PARAM_NODEID);
 
   // In multipoint mode, sync our slot to the source node's slot
   // The transmitting node is in its own transmit slot
   current_slot = trailer.source_node;
 
   // Sync timing - determine if this is our transmit or receive slot
-  if (current_slot == node_id) {
+  if (current_slot == my_node_id) {
     tdm_state = TDM_TRANSMIT;
   } else {
     tdm_state = TDM_RECEIVE;
@@ -270,9 +273,6 @@ sync_tx_windows(__pdata uint8_t packet_length)
 static void
 tdm_state_update(__pdata uint16_t tdelta)
 {
-  __pdata uint8_t node_id = param_get(PARAM_NODEID);
-  __pdata uint8_t num_nodes = param_get(PARAM_NUM_NODES);
-
   // update the amount of time we are waiting for a preamble
   // to turn into a real packet
   if (tdelta > transmit_wait) {
@@ -298,7 +298,7 @@ tdm_state_update(__pdata uint16_t tdelta)
     if (tdm_state == TDM_TRANSMIT || tdm_state == TDM_RECEIVE) {
       tdm_state_remaining = tx_window_width;
       // Override state based on current slot
-      if (current_slot == node_id) {
+      if (current_slot == my_node_id) {
         tdm_state = TDM_TRANSMIT;
       } else {
         tdm_state = TDM_RECEIVE;
@@ -580,12 +580,9 @@ tdm_serial_loop(void)
       len -= sizeof(trailer);
 
       // Check if packet is addressed to this node or broadcast
-      {
-        __pdata uint8_t my_node_id = param_get(PARAM_NODEID);
-        if (trailer.dest_node != 3 && trailer.dest_node != my_node_id) {
-          // Packet not for us (not broadcast and not our ID), ignore it
-          continue;
-        }
+      if (trailer.dest_node != 3 && trailer.dest_node != my_node_id) {
+        // Packet not for us (not broadcast and not our ID), ignore it
+        continue;
       }
 
       if (trailer.window == 0 && len != 0) {
@@ -779,7 +776,7 @@ tdm_serial_loop(void)
     }
 
     trailer.resend = packet_is_resend();
-    trailer.source_node = param_get(PARAM_NODEID);
+    trailer.source_node = my_node_id;
     trailer.dest_node = 3;  // Broadcast to all nodes (3 = broadcast in 2-bit field)
 
     if (tdm_state == TDM_TRANSMIT &&
@@ -1078,9 +1075,11 @@ tdm_init(void)
         TDM_SYNC_PIN = false;
 #endif // TDM_SYNC_LOGIC
 
-	// Initialize multipoint slot tracking
+	// Initialize multipoint configuration - cache values to avoid repeated param_get() calls
+	my_node_id = param_get(PARAM_NODEID);
+	num_nodes = param_get(PARAM_NUM_NODES);
 	// Start at our own node ID so we begin in transmit mode
-	current_slot = param_get(PARAM_NODEID);
+	current_slot = my_node_id;
 
 	// crc_test();
 
