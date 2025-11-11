@@ -143,12 +143,13 @@ static __bit send_statistics;
 extern uint8_t seen_mavlink;
 
 struct tdm_trailer {
-	uint16_t window:13;
+	uint16_t window:10;     // Reduced from 13 to 10 bits (max ~16ms)
 	uint16_t command:1;
-	uint16_t bonus:1;
+	uint16_t source_node:2; // Source node ID (0-3)
+	uint16_t dest_node:2;   // Destination node ID (0-2 unicast, 3=broadcast)
 	uint16_t resend:1;
-	uint8_t source_node:4;  // Source node ID (0-15)
-	uint8_t dest_node:4;    // Destination node ID (0-15, 0xF=broadcast)
+	// Total: 16 bits (10+1+2+2+1)
+	// Note: removed 'bonus' bit to fit addressing - bonus transmit disabled in multipoint
 #ifdef INCLUDE_AES
 	uint16_t crc;
 #endif
@@ -233,46 +234,16 @@ sync_tx_windows(__pdata uint8_t packet_length)
   // The transmitting node is in its own transmit slot
   current_slot = trailer.source_node;
 
-  if (trailer.bonus) {
-    // the other radio is using our transmit window
-    // via yielded ticks
-    if (old_state == TDM_SILENCE1) {
-      // This can be caused by a packet
-      // taking longer than expected to arrive.
-      // don't change back to transmit state or we
-      // will cause an extra frequency change which
-      // will get us out of sequence
-      tdm_state_remaining = silence_period;
-    } else if (old_state == TDM_RECEIVE || old_state == TDM_SILENCE2) {
-      // this is quite strange. We received a packet
-      // so we must have been on the right
-      // frequency. Best bet is to set us at the end
-      // of their silence period
-      tdm_state = TDM_SILENCE2;
-      tdm_state_remaining = 1;
-    } else {
-      // Check if this is our transmit slot
-      if (current_slot == node_id) {
-        tdm_state = TDM_TRANSMIT;
-      } else {
-        tdm_state = TDM_RECEIVE;
-      }
-      tdm_state_remaining = trailer.window;
-    }
+  // Sync timing - determine if this is our transmit or receive slot
+  if (current_slot == node_id) {
+    tdm_state = TDM_TRANSMIT;
   } else {
-    // we are in the other radios transmit window, our
-    // receive window (unless it's our slot)
-    if (current_slot == node_id) {
-      tdm_state = TDM_TRANSMIT;
-    } else {
-      tdm_state = TDM_RECEIVE;
-    }
-    tdm_state_remaining = trailer.window;
+    tdm_state = TDM_RECEIVE;
   }
+  tdm_state_remaining = trailer.window;
   
-  // if the other end has sent a zero length packet and we are
-  // in their transmit window then they are yielding some ticks to us.
-  bonus_transmit = (tdm_state == TDM_RECEIVE && packet_length==0);
+  // Bonus transmit disabled in multipoint mode to save packet space
+  bonus_transmit = 0;
   
   // if we are not in transmit state then we can't be yielded
   if (tdm_state != TDM_TRANSMIT) {
@@ -611,8 +582,8 @@ tdm_serial_loop(void)
       // Check if packet is addressed to this node or broadcast
       {
         __pdata uint8_t my_node_id = param_get(PARAM_NODEID);
-        if (trailer.dest_node != 0xF && trailer.dest_node != my_node_id) {
-          // Packet not for us, ignore it
+        if (trailer.dest_node != 3 && trailer.dest_node != my_node_id) {
+          // Packet not for us (not broadcast and not our ID), ignore it
           continue;
         }
       }
@@ -806,11 +777,10 @@ tdm_serial_loop(void)
     if (len > max_data_packet_length) {
       panic("oversized tdm packet");
     }
-    
-    trailer.bonus = (tdm_state == TDM_RECEIVE);
+
     trailer.resend = packet_is_resend();
     trailer.source_node = param_get(PARAM_NODEID);
-    trailer.dest_node = 0xF;  // Broadcast to all nodes
+    trailer.dest_node = 3;  // Broadcast to all nodes (3 = broadcast in 2-bit field)
 
     if (tdm_state == TDM_TRANSMIT &&
             len == 0 &&
@@ -1084,9 +1054,9 @@ tdm_init(void)
 		window_width = param_get(PARAM_MAX_WINDOW)*(1000/16);
 	}
 
-	// make sure it fits in the 13 bits of the trailer window
-	if (window_width > 0x1fff) {
-		window_width = 0x1fff;
+	// make sure it fits in the 10 bits of the trailer window
+	if (window_width > 0x3ff) {
+		window_width = 0x3ff;
 	}
 
 	tx_window_width = window_width;

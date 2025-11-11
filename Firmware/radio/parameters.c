@@ -69,7 +69,7 @@ __code const struct parameter_info {
 	{"LBT_RSSI",        0},
 	{"MANCHESTER",      0},
 	{"RTSCTS",          0},
-	{"MAX_WINDOW",    131},
+	{"MAX_WINDOW",     12},  // Reduced from 131ms (10-bit window vs 13-bit)
 #ifdef INCLUDE_AES
 	{"ENCRYPTION_LEVEL", 0}, // no Enycryption (0), 128 or 256 bit key
 #endif
@@ -162,22 +162,22 @@ param_check(__pdata enum ParamID id, __data uint32_t val)
 		break;
 
 	case PARAM_MAX_WINDOW:
-		// 131 milliseconds == 0x1FFF 16 usec ticks,
-		// which is the maximum we can handle with a 13
+		// 16 milliseconds == 0x3FF 16 usec ticks,
+		// which is the maximum we can handle with a 10
 		// bit trailer for window remaining
-		if (val > 131)
+		if (val > 16)
 			return false;
 		break;
 
 	case PARAM_NODEID:
-		// Node ID must be 0-15 (4 bits)
-		if (val > 15)
+		// Node ID must be 0-3 (2 bits)
+		if (val > 3)
 			return false;
 		break;
 
 	case PARAM_NUM_NODES:
-		// Number of nodes must be 2-16
-		if (val < 2 || val > 16)
+		// Number of nodes must be 2-4
+		if (val < 2 || val > 4)
 			return false;
 		break;
 
