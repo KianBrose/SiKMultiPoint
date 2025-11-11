@@ -73,6 +73,8 @@ __code const struct parameter_info {
 #ifdef INCLUDE_AES
 	{"ENCRYPTION_LEVEL", 0}, // no Enycryption (0), 128 or 256 bit key
 #endif
+	{"NODEID",          0},  // Node ID 0 by default
+	{"NUM_NODES",       2},  // 2 nodes by default (point-to-point)
 };
 
 /// In-RAM parameter store.
@@ -164,6 +166,18 @@ param_check(__pdata enum ParamID id, __data uint32_t val)
 		// which is the maximum we can handle with a 13
 		// bit trailer for window remaining
 		if (val > 131)
+			return false;
+		break;
+
+	case PARAM_NODEID:
+		// Node ID must be 0-15 (4 bits)
+		if (val > 15)
+			return false;
+		break;
+
+	case PARAM_NUM_NODES:
+		// Number of nodes must be 2-16
+		if (val < 2 || val > 16)
 			return false;
 		break;
 
